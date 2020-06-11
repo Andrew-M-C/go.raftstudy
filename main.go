@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	pb "github.com/coreos/etcd/raft/raftpb"
@@ -27,7 +28,7 @@ var (
 )
 
 const (
-	tickMillisecond = 20
+	tickMillisecond = 100
 )
 
 func main() {
@@ -59,6 +60,7 @@ func startNode(id uint64, peers []raft.Peer) {
 
 	n := &node{
 		id:          id,
+		prefix:      strings.Repeat("\t\t\t", int(id)) + "| ",
 		node:        raft.StartNode(&c, peers),
 		tick:        time.NewTicker(tickMillisecond * time.Millisecond),
 		recv:        bcChans[id-1],
@@ -75,20 +77,21 @@ func startNode(id uint64, peers []raft.Peer) {
 
 		case rd := <-n.node.Ready():
 			// infof("%d - ready: %+v", id, rd)
-			if raft.IsEmptySnap(rd.Snapshot) {
-				infof("%d - EmptySnap", id)
-			} else {
-				infof("%d - Snapshot: %+v", id, rd.Snapshot)
-			}
+			// if raft.IsEmptySnap(rd.Snapshot) {
+			// 	infof("%d - EmptySnap", id)
+			// } else {
+			// 	infof("%d - Snapshot: %+v", id, rd.Snapshot)
+			// }
 			n.raftStorage.Append(rd.Entries)
-			go sendMessage(id, rd.Messages)
+			go n.sendMessage(rd.Messages)
 			n.node.Advance()
 
 		case m := <-n.recv:
-			infof("%d - got message from %v to %v, type %v", id, m.From, m.To, m.Type)
-			b, _ := m.Marshal()
-			n.node.Propose(ctx, b)
-			infof("%d - status: %v", id, n.node.Status().RaftState)
+			infof("%d -%s got message from %v to %v, type %v", id, n.prefix, m.From, m.To, m.Type)
+			n.node.Step(ctx, m)
+			// b, _ := m.Marshal()
+			// n.node.Propose(ctx, b)
+			infof("%d -%s status: %v", id, n.prefix, n.node.Status().RaftState)
 
 		default:
 			// infof("%d - default", id)
@@ -100,18 +103,19 @@ func startNode(id uint64, peers []raft.Peer) {
 
 type node struct {
 	id          uint64
+	prefix      string
 	node        raft.Node
 	tick        *time.Ticker
 	recv        chan pb.Message
 	raftStorage *raft.MemoryStorage
 }
 
-func sendMessage(id uint64, msg []pb.Message) {
+func (n *node) sendMessage(msg []pb.Message) {
 	for _, m := range msg {
 		to := m.To
 		ch := bcChans[to-1]
+		infof("%d -%s send to %v, type %v", n.id, n.prefix, m.To, m.Type)
 		ch <- m
-		infof("%d - send to %d done", id, to)
 	}
 	return
 }
