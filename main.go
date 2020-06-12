@@ -74,8 +74,6 @@ func startNode(id uint64, peers []raft.Peer) {
 		raftStorage: storage,
 	}
 
-	go n.receive()
-
 	for {
 		select {
 		// case <-n.tick.C:
@@ -126,9 +124,5 @@ func (n *node) sendMessage(msg []raftpb.Message) {
 		infof("%d -%s send to %v, type %v", n.id, n.prefix, m.To, m.Type)
 		ch <- m
 	}
-	return
-}
-
-func (n *node) receive() {
 	return
 }
