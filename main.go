@@ -6,29 +6,35 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/etcd-io/etcd/raft"
+	"github.com/influxdata/telegraf/agent"
 )
 
 func init() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
 
-	bcChans = []chan pb.Message{
-		make(chan pb.Message),
-		make(chan pb.Message),
-		make(chan pb.Message),
-	}
+	// bcChans = []chan raftpb.Message{
+	// 	make(chan raftpb.Message),
+	// 	make(chan raftpb.Message),
+	// 	make(chan raftpb.Message),
+	// }
 }
 
 var (
 	infof  = log.Printf
 	errorf = log.Printf
 
-	bcChans = []chan pb.Message{}
+	bcChans = []chan raftpb.Message{
+		make(chan raftpb.Message),
+		make(chan raftpb.Message),
+		make(chan raftpb.Message),
+	}
 )
 
 const (
-	tickMillisecond = 100
+	tickInterval      = 100 * time.Millisecond
+	jitterMillisecond = 15 * time.Millisecond
 )
 
 func main() {
@@ -59,10 +65,11 @@ func startNode(id uint64, peers []raft.Peer) {
 	}
 
 	n := &node{
-		id:          id,
-		prefix:      strings.Repeat("\t\t\t", int(id)) + "| ",
-		node:        raft.StartNode(&c, peers),
-		tick:        time.NewTicker(tickMillisecond * time.Millisecond),
+		id:     id,
+		prefix: strings.Repeat("\t\t\t", int(id)) + "| ",
+		node:   raft.StartNode(&c, peers),
+		// tick:        time.NewTicker(tickInterval),
+		tick:        agent.NewRollingTicker(tickInterval-jitterMillisecond, tickInterval+jitterMillisecond),
 		recv:        bcChans[id-1],
 		raftStorage: storage,
 	}
@@ -71,7 +78,8 @@ func startNode(id uint64, peers []raft.Peer) {
 
 	for {
 		select {
-		case <-n.tick.C:
+		// case <-n.tick.C:
+		case <-n.tick.Elapsed():
 			n.node.Tick()
 			// infof("%d - tick, status: %+v", n.id, n.node.Status())
 
@@ -102,15 +110,16 @@ func startNode(id uint64, peers []raft.Peer) {
 }
 
 type node struct {
-	id          uint64
-	prefix      string
-	node        raft.Node
-	tick        *time.Ticker
-	recv        chan pb.Message
+	id     uint64
+	prefix string
+	node   raft.Node
+	// tick        *time.Ticker
+	tick        *agent.RollingTicker
+	recv        chan raftpb.Message
 	raftStorage *raft.MemoryStorage
 }
 
-func (n *node) sendMessage(msg []pb.Message) {
+func (n *node) sendMessage(msg []raftpb.Message) {
 	for _, m := range msg {
 		to := m.To
 		ch := bcChans[to-1]
