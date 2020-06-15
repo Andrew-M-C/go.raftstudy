@@ -30,6 +30,18 @@ var (
 		make(chan raftpb.Message),
 		make(chan raftpb.Message),
 	}
+
+	dataChans = []chan string{
+		make(chan string),
+		make(chan string),
+		make(chan string),
+	}
+
+	entryChans = []chan raftpb.Entry{
+		make(chan raftpb.Entry),
+		make(chan raftpb.Entry),
+		make(chan raftpb.Entry),
+	}
 )
 
 const (
@@ -47,6 +59,10 @@ func main() {
 	go startNode(0x01, peers)
 	go startNode(0x02, peers)
 	go startNode(0x03, peers)
+	time.Sleep(2 * time.Second)
+
+	// send data
+	dataChans[0] <- "Hello"
 
 	time.Sleep(2 * time.Second)
 	return
@@ -71,6 +87,8 @@ func startNode(id uint64, peers []raft.Peer) {
 		// tick:        time.NewTicker(tickInterval),
 		tick:        agent.NewRollingTicker(tickInterval-jitterMillisecond, tickInterval+jitterMillisecond),
 		recv:        bcChans[id-1],
+		msg:         dataChans[id-1],
+		entry:       entryChans[id-1],
 		raftStorage: storage,
 	}
 
@@ -88,15 +106,32 @@ func startNode(id uint64, peers []raft.Peer) {
 			// } else {
 			// 	infof("%d - Snapshot: %+v", id, rd.Snapshot)
 			// }
+			for _, en := range rd.Entries {
+				infof("%d -%s got entry: %v, %v, %s (%d)", id, n.prefix, en.Index, en.Type, en.Data, len(en.Data))
+				switch en.Type {
+				case raftpb.EntryConfChange:
+					cc := raftpb.ConfChange{}
+					err := cc.Unmarshal(en.Data)
+					if err != nil {
+						errorf("%d -%s unmarshal EntryConfChange error: %v", id, n.prefix, err)
+					} else {
+						infof("%d -%s got EntryConfChange: %+v", id, n.prefix, cc)
+						n.node.ApplyConfChange(cc)
+						// n.node.ProposeConfChange(ctx, cc)
+					}
+				}
+			}
 			n.raftStorage.Append(rd.Entries)
 			go n.sendMessage(rd.Messages)
 			n.node.Advance()
 
+		case msg := <-n.msg:
+			infof("%d -%s got external message request: '%s'", id, n.prefix, msg)
+			n.node.Propose(ctx, []byte(msg))
+
 		case m := <-n.recv:
 			infof("%d -%s got message from %v to %v, type %v", id, n.prefix, m.From, m.To, m.Type)
 			n.node.Step(ctx, m)
-			// b, _ := m.Marshal()
-			// n.node.Propose(ctx, b)
 			infof("%d -%s status: %v", id, n.prefix, n.node.Status().RaftState)
 
 		default:
@@ -114,6 +149,8 @@ type node struct {
 	// tick        *time.Ticker
 	tick        *agent.RollingTicker
 	recv        chan raftpb.Message
+	msg         chan string
+	entry       chan raftpb.Entry
 	raftStorage *raft.MemoryStorage
 }
 
