@@ -29,9 +29,11 @@ var (
 		make(chan raftpb.Message),
 		make(chan raftpb.Message),
 		make(chan raftpb.Message),
+		make(chan raftpb.Message),
 	}
 
 	dataChans = []chan string{
+		make(chan string),
 		make(chan string),
 		make(chan string),
 		make(chan string),
@@ -41,6 +43,14 @@ var (
 		make(chan raftpb.Entry),
 		make(chan raftpb.Entry),
 		make(chan raftpb.Entry),
+		make(chan raftpb.Entry),
+	}
+
+	confChangeChans = []chan raftpb.ConfChange{
+		make(chan raftpb.ConfChange),
+		make(chan raftpb.ConfChange),
+		make(chan raftpb.ConfChange),
+		make(chan raftpb.ConfChange),
 	}
 )
 
@@ -56,19 +66,24 @@ func main() {
 	// infof("ElectionTimeout = %v", raft.ElectionTimeout)
 
 	peers := []raft.Peer{{ID: 0x01}, {ID: 0x02}, {ID: 0x03}}
-	go startNode(0x01, peers)
-	go startNode(0x02, peers)
-	go startNode(0x03, peers)
+	go startNode(0x01, peers, false)
+	go startNode(0x02, peers, false)
+	go startNode(0x03, peers, false)
 	time.Sleep(2 * time.Second)
 
 	// send data
 	dataChans[0] <- "Hello"
+	time.Sleep(time.Second)
 
-	time.Sleep(2 * time.Second)
+	// add node
+	peers = append(peers, raft.Peer{ID: 0x04})
+	go startNode(0x04, peers, true)
+	time.Sleep(4 * time.Second)
+
 	return
 }
 
-func startNode(id uint64, peers []raft.Peer) {
+func startNode(id uint64, peers []raft.Peer, shouldAddNode bool) {
 	ctx := context.TODO()
 	storage := raft.NewMemoryStorage()
 	c := raft.Config{
@@ -89,7 +104,31 @@ func startNode(id uint64, peers []raft.Peer) {
 		recv:        bcChans[id-1],
 		msg:         dataChans[id-1],
 		entry:       entryChans[id-1],
+		confChange:  confChangeChans[id-1],
 		raftStorage: storage,
+		nodeIDMap:   map[uint64]bool{},
+	}
+
+	for _, peer := range peers {
+		n.nodeIDMap[peer.ID] = true
+	}
+
+	if shouldAddNode {
+		cc := raftpb.ConfChange{
+			Type:   raftpb.ConfChangeAddNode,
+			NodeID: id,
+		}
+		infof("%d -%s now ProposeConfChange: %+v", id, n.prefix, cc)
+
+		for i, ch := range confChangeChans {
+			if uint64(i) == id-1 {
+				continue
+			}
+			go func(i int, ch chan raftpb.ConfChange) {
+				infof("%d -%s send confChange to %d", id, n.prefix, i+1)
+				ch <- cc
+			}(i, ch)
+		}
 	}
 
 	for {
@@ -98,14 +137,20 @@ func startNode(id uint64, peers []raft.Peer) {
 		case <-n.tick.Elapsed():
 			n.node.Tick()
 			// infof("%d - tick, status: %+v", n.id, n.node.Status())
+			// if false == n.amIInGroup {
+			// 	cc := raftpb.ConfChange{
+			// 		Type:   raftpb.ConfChangeAddNode,
+			// 		NodeID: id,
+			// 	}
+			// 	infof("%d -%s now ProposeConfChange: %+v", id, n.prefix, cc)
+			// 	err := n.node.ProposeConfChange(ctx, cc)
+			// 	if err != nil {
+			// 		errorf("%d -%s ProposeConfChange error: %v", id, n.prefix, err)
+			// 	}
+			// }
 
 		case rd := <-n.node.Ready():
-			// infof("%d - ready: %+v", id, rd)
-			// if raft.IsEmptySnap(rd.Snapshot) {
-			// 	infof("%d - EmptySnap", id)
-			// } else {
-			// 	infof("%d - Snapshot: %+v", id, rd.Snapshot)
-			// }
+			// infof("%d -%s ready: %+v", id, n.prefix, rd)
 			for _, en := range rd.Entries {
 				infof("%d -%s got entry: %v, %v, %s (%d)", id, n.prefix, en.Index, en.Type, en.Data, len(en.Data))
 				switch en.Type {
@@ -117,13 +162,27 @@ func startNode(id uint64, peers []raft.Peer) {
 					} else {
 						infof("%d -%s got EntryConfChange: %+v", id, n.prefix, cc)
 						n.node.ApplyConfChange(cc)
-						// n.node.ProposeConfChange(ctx, cc)
+						if cc.NodeID == id {
+							infof("%d -%s I am recognized by group", id, n.prefix)
+						}
 					}
 				}
 			}
 			n.raftStorage.Append(rd.Entries)
 			go n.sendMessage(rd.Messages)
 			n.node.Advance()
+
+		case cc := <-n.confChange:
+			infof("%d -%s conf change", id, n.prefix)
+			if cc.Type == raftpb.ConfChangeAddNode {
+				if _, exist := n.nodeIDMap[cc.NodeID]; false == exist {
+					infof("%d -%s request add node %d", id, n.prefix, cc.NodeID)
+					err := n.node.ProposeConfChange(ctx, cc)
+					if err != nil {
+						errorf("%d -%s ProposeConfChange error: %v", id, n.prefix, err)
+					}
+				}
+			}
 
 		case msg := <-n.msg:
 			infof("%d -%s got external message request: '%s'", id, n.prefix, msg)
@@ -151,7 +210,9 @@ type node struct {
 	recv        chan raftpb.Message
 	msg         chan string
 	entry       chan raftpb.Entry
+	confChange  chan raftpb.ConfChange
 	raftStorage *raft.MemoryStorage
+	nodeIDMap   map[uint64]bool
 }
 
 func (n *node) sendMessage(msg []raftpb.Message) {
