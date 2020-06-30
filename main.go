@@ -72,13 +72,17 @@ func main() {
 	time.Sleep(2 * time.Second)
 
 	// send data
-	dataChans[0] <- "Hello"
+	dataChans[1] <- "ETCD"
 	time.Sleep(time.Second)
 
 	// add node
 	peers = append(peers, raft.Peer{ID: 0x04})
 	go startNode(0x04, peers, true)
-	time.Sleep(4 * time.Second)
+	time.Sleep(2 * time.Second)
+
+	// send data
+	dataChans[1] <- "ETCD/RAFT"
+	time.Sleep(2 * time.Second)
 
 	return
 }
@@ -136,23 +140,17 @@ func startNode(id uint64, peers []raft.Peer, shouldAddNode bool) {
 		// case <-n.tick.C:
 		case <-n.tick.Elapsed():
 			n.node.Tick()
-			// infof("%d - tick, status: %+v", n.id, n.node.Status())
-			// if false == n.amIInGroup {
-			// 	cc := raftpb.ConfChange{
-			// 		Type:   raftpb.ConfChangeAddNode,
-			// 		NodeID: id,
-			// 	}
-			// 	infof("%d -%s now ProposeConfChange: %+v", id, n.prefix, cc)
-			// 	err := n.node.ProposeConfChange(ctx, cc)
-			// 	if err != nil {
-			// 		errorf("%d -%s ProposeConfChange error: %v", id, n.prefix, err)
-			// 	}
-			// }
 
 		case rd := <-n.node.Ready():
 			// infof("%d -%s ready: %+v", id, n.prefix, rd)
-			for _, en := range rd.Entries {
-				infof("%d -%s got entry: %v, %v, %s (%d)", id, n.prefix, en.Index, en.Type, en.Data, len(en.Data))
+			infof("%d -%s ready, Entries count %d, CommittedEntries count %d",
+				id, n.prefix, len(rd.Entries), len(rd.CommittedEntries),
+			)
+			if false == raft.IsEmptySnap(rd.Snapshot) {
+				infof("%d -%s is NOT empty snapshot", id, n.prefix)
+			}
+			for _, en := range rd.CommittedEntries {
+				infof("%d -%s got CommittedEntries: %v, %v, %s (%d)", id, n.prefix, en.Index, en.Type, en.Data, len(en.Data))
 				switch en.Type {
 				case raftpb.EntryConfChange:
 					cc := raftpb.ConfChange{}
@@ -167,6 +165,10 @@ func startNode(id uint64, peers []raft.Peer, shouldAddNode bool) {
 						}
 					}
 				}
+			}
+
+			for _, en := range rd.Entries {
+				infof("%d -%s got entry: %v, %v, %s (%d)", id, n.prefix, en.Index, en.Type, en.Data, len(en.Data))
 			}
 			n.raftStorage.Append(rd.Entries)
 			go n.sendMessage(rd.Messages)
@@ -186,12 +188,20 @@ func startNode(id uint64, peers []raft.Peer, shouldAddNode bool) {
 
 		case msg := <-n.msg:
 			infof("%d -%s got external message request: '%s'", id, n.prefix, msg)
-			n.node.Propose(ctx, []byte(msg))
+			err := n.node.Propose(ctx, []byte(msg))
+			if err != nil {
+				errorf("%d -%s Propose error: %v", id, n.prefix, err)
+			}
 
 		case m := <-n.recv:
 			infof("%d -%s got message from %v to %v, type %v", id, n.prefix, m.From, m.To, m.Type)
 			n.node.Step(ctx, m)
 			infof("%d -%s status: %v", id, n.prefix, n.node.Status().RaftState)
+			if lastIdx, err := n.raftStorage.LastIndex(); err != nil {
+				errorf("%d -%s read LastIndex error: %v", err)
+			} else {
+				infof("%d -%s LastIndex: %d", id, n.prefix, lastIdx)
+			}
 
 		default:
 			// infof("%d - default", id)
@@ -219,7 +229,9 @@ func (n *node) sendMessage(msg []raftpb.Message) {
 	for _, m := range msg {
 		to := m.To
 		ch := bcChans[to-1]
-		infof("%d -%s send to %v, type %v", n.id, n.prefix, m.To, m.Type)
+		for _, entry := range m.Entries {
+			infof("%d -%s send from %d to %v, type %v, entry type %v, term %d, Index %d", n.id, n.prefix, m.From, m.To, m.Type, entry.Type, m.Term, m.Index)
+		}
 		ch <- m
 	}
 	return
