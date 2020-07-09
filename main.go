@@ -101,7 +101,7 @@ func startNode(id uint64, peers []raft.Peer, shouldAddNode bool) {
 
 	n := &node{
 		id:     id,
-		prefix: strings.Repeat("\t\t\t", int(id)) + "| ",
+		prefix: strings.Repeat("\t\t", int(id)) + "| ",
 		node:   raft.StartNode(&c, peers),
 		// tick:        time.NewTicker(tickInterval),
 		tick:        agent.NewRollingTicker(tickInterval-jitterMillisecond, tickInterval+jitterMillisecond),
@@ -159,11 +159,14 @@ func startNode(id uint64, peers []raft.Peer, shouldAddNode bool) {
 						errorf("%d -%s unmarshal EntryConfChange error: %v", id, n.prefix, err)
 					} else {
 						infof("%d -%s got EntryConfChange: %+v", id, n.prefix, cc)
-						n.node.ApplyConfChange(cc)
+						confState := n.node.ApplyConfChange(cc)
+						infof("%d -%s ApplyConfChange done, confState: %v", id, n.prefix, confState)
 						if cc.NodeID == id {
 							infof("%d -%s I am recognized by group", id, n.prefix)
 						}
 					}
+				default:
+					infof("%d -%s got CommittedEntrie type: %v", id, n.prefix, en.Type)
 				}
 			}
 
@@ -175,15 +178,10 @@ func startNode(id uint64, peers []raft.Peer, shouldAddNode bool) {
 			n.node.Advance()
 
 		case cc := <-n.confChange:
-			infof("%d -%s conf change", id, n.prefix)
-			if cc.Type == raftpb.ConfChangeAddNode {
-				if _, exist := n.nodeIDMap[cc.NodeID]; false == exist {
-					infof("%d -%s request add node %d", id, n.prefix, cc.NodeID)
-					err := n.node.ProposeConfChange(ctx, cc)
-					if err != nil {
-						errorf("%d -%s ProposeConfChange error: %v", id, n.prefix, err)
-					}
-				}
+			infof("%d -%s request add node %d", id, n.prefix, cc.NodeID)
+			err := n.node.ProposeConfChange(ctx, cc)
+			if err != nil {
+				errorf("%d -%s ProposeConfChange error: %v", id, n.prefix, err)
 			}
 
 		case msg := <-n.msg:
